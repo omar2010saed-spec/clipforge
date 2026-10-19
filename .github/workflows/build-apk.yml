@@ -18,7 +18,31 @@ permissions:
   contents: write
 
 jobs:
+  # 1) is the FFmpeg engine already built? (it is built once and kept as a release asset)
+  engine-check:
+    runs-on: ubuntu-24.04
+    outputs:
+      exists: ${{ steps.c.outputs.exists }}
+    steps:
+      - id: c
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view ffmpeg-engine --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx ffmpeg-kit.aar; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # 2) if not, build it first (one time, ~1 hour)
+  engine:
+    needs: engine-check
+    if: needs.engine-check.outputs.exists != 'true'
+    uses: ./.github/workflows/build-ffmpeg.yml
+
   apk:
+    needs: [engine-check, engine]
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -39,6 +63,20 @@ jobs:
           npm install 2>&1 | tee -a ci.log
 
       # Informational: a type warning will not stop you from getting an APK.
+      - name: Fetch FFmpeg engine
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download ffmpeg-engine --repo "$GITHUB_REPOSITORY" -p ffmpeg-kit.aar -D engine --clobber
+          node scripts/make-local-maven.js engine/ffmpeg-kit.aar
+
+      - name: Fetch FFmpeg engine
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download ffmpeg-engine --repo "$GITHUB_REPOSITORY" -p ffmpeg-kit.aar -D engine --clobber
+          node scripts/make-local-maven.js engine/ffmpeg-kit.aar
+
       - name: Type check
         continue-on-error: true
         run: |

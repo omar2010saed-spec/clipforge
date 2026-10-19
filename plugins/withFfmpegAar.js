@@ -1,74 +1,30 @@
 /**
- * OPTIONAL (untested) Expo config plugin.
+ * Expo config plugin: makes the self-built FFmpegKit engine available to Gradle.
  *
- * ffmpeg-kit's official binaries were removed from Maven, so the JS package
- * `ffmpeg-kit-react-native` can no longer resolve its native dependency.
- * If you place your own FFmpegKit AAR at `vendor/ffmpeg-kit.aar`, this plugin:
- *   - copies it to android/app/libs
- *   - adds a flatDir repository
- *   - substitutes every `com.arthenica:ffmpeg-kit-*` module with the local AAR
- * If the file does not exist the plugin does nothing, so the app still builds.
+ * ffmpeg-kit's official Maven binaries were removed, so CI builds the AAR itself
+ * (.github/workflows/build-ffmpeg.yml) and `scripts/make-local-maven.js` turns it into
+ * `vendor/maven`. When that folder exists this plugin adds it as a Maven repository and
+ * selects the "min" package name. Without it the plugin does nothing.
  */
 const fs = require('fs');
 const path = require('path');
-const { withProjectBuildGradle, withDangerousMod, withAppBuildGradle } = require('@expo/config-plugins');
-
-const AAR = 'ffmpeg-kit.aar';
-
-function hasAar(projectRoot) {
-  return fs.existsSync(path.join(projectRoot, 'vendor', AAR));
-}
+const { withProjectBuildGradle } = require('@expo/config-plugins');
 
 module.exports = function withFfmpegAar(config) {
-  config = withDangerousMod(config, [
-    'android',
-    async (cfg) => {
-      const root = cfg.modRequest.projectRoot;
-      if (!hasAar(root)) return cfg;
-      const libs = path.join(cfg.modRequest.platformProjectRoot, 'libs');
-      fs.mkdirSync(libs, { recursive: true });
-      fs.copyFileSync(path.join(root, 'vendor', AAR), path.join(libs, 'ffmpeg-kit-local-1.0.aar'));
-      return cfg;
-    },
-  ]);
-
-  config = withProjectBuildGradle(config, (cfg) => {
-    if (!hasAar(cfg.modRequest.projectRoot)) return cfg;
+  return withProjectBuildGradle(config, (cfg) => {
+    const repo = path.join(cfg.modRequest.projectRoot, 'vendor', 'maven');
+    if (!fs.existsSync(repo)) return cfg;
     const marker = '// ffmpeg-kit-local';
     if (cfg.modResults.contents.includes(marker)) return cfg;
     cfg.modResults.contents += `
 ${marker}
+ext { ffmpegKitPackage = "min" }
 allprojects {
   repositories {
-    flatDir { dirs "$rootDir/libs" }
-  }
-  configurations.all {
-    resolutionStrategy.dependencySubstitution {
-      all { DependencySubstitution dep ->
-        def r = dep.requested
-        if (r instanceof ModuleComponentSelector && r.group == 'com.arthenica') {
-          dep.useTarget 'local:ffmpeg-kit-local:1.0'
-        }
-      }
-    }
+    maven { url = uri("file://${repo.replace(/\\/g, '/')}") }
   }
 }
 `;
     return cfg;
   });
-
-  config = withAppBuildGradle(config, (cfg) => {
-    if (!hasAar(cfg.modRequest.projectRoot)) return cfg;
-    const marker = '// ffmpeg-kit-local-deps';
-    if (cfg.modResults.contents.includes(marker)) return cfg;
-    cfg.modResults.contents += `
-${marker}
-dependencies {
-  implementation 'com.arthenica:smart-exception-java:0.2.1'
-}
-`;
-    return cfg;
-  });
-
-  return config;
 };
