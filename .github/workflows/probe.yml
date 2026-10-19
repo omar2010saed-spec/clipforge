@@ -7,23 +7,18 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Probe
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           {
-          echo "## maven search"
-          curl -s "https://search.maven.org/solrsearch/select?q=ffmpeg-kit&rows=40&wt=json" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(x['id'],x['latestVersion']) for x in d['response']['docs']]" 2>&1
-          echo "## direct maven checks"
-          for a in ffmpeg-kit-full-gpl/6.0-2 ffmpeg-kit-full/6.0-2 ffmpeg-kit-min-gpl/6.0-2 ffmpeg-kit-https/6.0-2 ffmpeg-kit-video/6.0-2; do
-            n=${a%%/*}; v=${a##*/}
-            echo "$n $v $(curl -s -o /dev/null -w '%{http_code}' https://repo1.maven.org/maven2/com/arthenica/$n/$v/$n-$v.aar)"
+          for n in ffmpeg-kit-full-gpl ffmpeg-kit-video ffmpeg-kit-min-gpl; do
+            echo "## $n versions"
+            curl -s https://repo1.maven.org/maven2/com/arthenica/$n/maven-metadata.xml | grep -E '<version>|latest|release' | tr -d ' \n'; echo
+            for v in 6.0.LTS 6.0-2 6.0-2.LTS 6.0; do
+              echo "$n $v aar=$(curl -s -o /dev/null -w '%{http_code} %{size_download}' -I https://repo1.maven.org/maven2/com/arthenica/$n/$v/$n-$v.aar)"
+            done
           done
-          echo "## releases"
-          gh api repos/arthenica/ffmpeg-kit/releases --jq '.[]|.tag_name+" "+([.assets[].name]|join(","))' 2>&1 | cut -c1-400 | head -12
-          echo "## ffmpeg-kit-next"
-          gh api repos/arthenica/ffmpeg-kit-next/releases --jq '.[]|.tag_name+" "+([.assets[].name]|join(","))' 2>&1 | cut -c1-400 | head -8
-          echo "## npm pkg"
-          npm view ffmpeg-kit-react-native versions --json 2>&1 | tail -5
-          npm view @spreen/ffmpeg-kit-react-native version 2>&1 | tail -2
+          echo "## npm 6.0.2 gradle"
+          mkdir t && cd t && npm pack ffmpeg-kit-react-native@6.0.2 -s >/dev/null && tar xzf *.tgz && grep -nE "ffmpeg-kit|implementation|ffmpegKit" package/android/build.gradle | head -20
+          grep -n "ffmpeg" package/ffmpeg-kit-react-native.podspec | head -5
+          ls package; cat package/app.plugin.js 2>/dev/null | head -5
           } > out.txt 2>&1
           echo "::error title=probe::$(sed -z 's/\n/%0A/g' out.txt)"
