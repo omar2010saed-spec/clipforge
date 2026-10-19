@@ -7,18 +7,18 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Probe
+        shell: bash {0}
         run: |
-          {
-          for n in ffmpeg-kit-full-gpl ffmpeg-kit-video ffmpeg-kit-min-gpl; do
-            echo "## $n versions"
-            curl -s https://repo1.maven.org/maven2/com/arthenica/$n/maven-metadata.xml | grep -E '<version>|latest|release' | tr -d ' \n'; echo
-            for v in 6.0.LTS 6.0-2 6.0-2.LTS 6.0; do
-              echo "$n $v aar=$(curl -s -o /dev/null -w '%{http_code} %{size_download}' -I https://repo1.maven.org/maven2/com/arthenica/$n/$v/$n-$v.aar)"
+          for n in ffmpeg-kit-full-gpl ffmpeg-kit-video; do
+            echo "## $n" >> out.txt
+            curl -s https://repo1.maven.org/maven2/com/arthenica/$n/maven-metadata.xml | tr -d ' \n' >> out.txt; echo >> out.txt
+            for v in 6.0.LTS 6.0-2 6.0-2.LTS 6.0.1; do
+              echo "$n $v $(curl -s -o /dev/null -w '%{http_code}' -I https://repo1.maven.org/maven2/com/arthenica/$n/$v/$n-$v.aar)" >> out.txt
             done
           done
-          echo "## npm 6.0.2 gradle"
-          mkdir t && cd t && npm pack ffmpeg-kit-react-native@6.0.2 -s >/dev/null && tar xzf *.tgz && grep -nE "ffmpeg-kit|implementation|ffmpegKit" package/android/build.gradle | head -20
-          grep -n "ffmpeg" package/ffmpeg-kit-react-native.podspec | head -5
-          ls package; cat package/app.plugin.js 2>/dev/null | head -5
-          } > out.txt 2>&1
-          echo "::error title=probe::$(head -c 3500 out.txt | sed -z "s/\n/%0A/g")"
+          mkdir t; cd t; npm pack ffmpeg-kit-react-native@6.0.2 -s >/dev/null 2>&1; tar xzf *.tgz
+          echo "## gradle" >> ../out.txt
+          grep -nE "ffmpeg|implementation" package/android/build.gradle | head -15 >> ../out.txt
+          ls package >> ../out.txt
+          cd ..
+          echo "::error title=probe::$(head -c 3500 out.txt | sed -z 's/\n/%0A/g')"
