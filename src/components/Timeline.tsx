@@ -140,12 +140,9 @@ function Block({
         accessibilityLabel={item.label}
       >
         {thumbUri ? (
-          <Image
-            source={{ uri: thumbUri }}
-            resizeMode="repeat"
-            style={[StyleSheet.absoluteFill, { opacity: 0.55 }]}
-            pointerEvents="none"
-          />
+          <View pointerEvents="none" style={[StyleSheet.absoluteFill, { opacity: 0.55 }]}>
+            <Image source={{ uri: thumbUri }} resizeMode="repeat" style={StyleSheet.absoluteFill} />
+          </View>
         ) : null}
         <Text style={[styles.blockText, thumbUri ? styles.blockTextOnThumb : null]} numberOfLines={1}>
           {item.badge ? `${item.badge}  ` : ''}
