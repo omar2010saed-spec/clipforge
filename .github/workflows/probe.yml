@@ -21,4 +21,4 @@ jobs:
           grep -n "ffmpeg" package/ffmpeg-kit-react-native.podspec | head -5
           ls package; cat package/app.plugin.js 2>/dev/null | head -5
           } > out.txt 2>&1
-          echo "::error title=probe::$(sed -z 's/\n/%0A/g' out.txt)"
+          echo "::error title=probe::$(head -c 3500 out.txt | sed -z "s/\n/%0A/g")"
