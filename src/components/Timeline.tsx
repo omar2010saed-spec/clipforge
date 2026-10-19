@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Image,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -16,6 +17,7 @@ import { assignLanes, moveClip, moveText } from '@/editor/timeline';
 import { useEditorStore } from '@/store/editorStore';
 import { colors, radius } from '@/theme/colors';
 import { formatDuration } from '@/utils/format';
+import { getVideoThumbnail } from '@/media/thumbnails';
 
 const LABEL_W = 30;
 const RULER_H = 26;
@@ -38,6 +40,8 @@ interface Item {
   end: number;
   label: string;
   badge?: string;
+  /** visual source for the thumbnail strip (video / image clips) */
+  thumb?: { uri: string; atMs: number; isImage: boolean };
 }
 
 function itemsOf(project: Project, kind: TrackKind): Item[] {
@@ -50,7 +54,11 @@ function itemsOf(project: Project, kind: TrackKind): Item[] {
   }
   return track.clips.map((c) => {
     const badges = [c.speed !== 1 ? `${c.speed}x` : '', c.reversed ? '⟲' : ''].filter(Boolean).join(' ');
-    return { id: c.id, type: 'clip' as const, start: c.startMs, end: clipEndMs(c), label: c.name, badge: badges };
+    const thumb =
+      c.kind === 'audio'
+        ? undefined
+        : { uri: c.sourceUri, atMs: c.inMs, isImage: c.kind === 'image' || c.kind === 'gif' };
+    return { id: c.id, type: 'clip' as const, start: c.startMs, end: clipEndMs(c), label: c.name, badge: badges, thumb };
   });
 }
 
@@ -85,6 +93,22 @@ function Block({
   onDragState: (dragging: boolean) => void;
 }) {
   const [dx, setDx] = useState(0);
+  const [thumbUri, setThumbUri] = useState<string | null>(null);
+  const thumb = item.thumb;
+  useEffect(() => {
+    let alive = true;
+    if (!thumb) return;
+    if (thumb.isImage) {
+      setThumbUri(thumb.uri);
+      return;
+    }
+    getVideoThumbnail(thumb.uri, thumb.atMs).then((u) => {
+      if (alive) setThumbUri(u);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [thumb?.uri, thumb?.atMs, thumb?.isImage]);
   const gesture = useMemo(
     () =>
       Gesture.Pan()
@@ -115,7 +139,15 @@ function Block({
         accessibilityRole="button"
         accessibilityLabel={item.label}
       >
-        <Text style={styles.blockText} numberOfLines={1}>
+        {thumbUri ? (
+          <Image
+            source={{ uri: thumbUri }}
+            resizeMode="repeat"
+            style={[StyleSheet.absoluteFill, { opacity: 0.55 }]}
+            pointerEvents="none"
+          />
+        ) : null}
+        <Text style={[styles.blockText, thumbUri ? styles.blockTextOnThumb : null]} numberOfLines={1}>
           {item.badge ? `${item.badge}  ` : ''}
           {item.label}
         </Text>
@@ -289,5 +321,6 @@ const styles = StyleSheet.create({
   block: { position: 'absolute', borderRadius: radius.sm, paddingHorizontal: 6, justifyContent: 'center', overflow: 'hidden' },
   blockSelected: { borderWidth: 2, borderColor: '#FFFFFF' },
   blockText: { color: '#fff', fontSize: 11, fontWeight: '600' },
+  blockTextOnThumb: { textShadowColor: '#000', textShadowRadius: 3 },
   playhead: { position: 'absolute', top: 0, bottom: 0, width: 2, backgroundColor: '#FFFFFF' },
 });
