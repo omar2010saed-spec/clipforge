@@ -1,0 +1,12 @@
+node_modules/
+.expo/
+dist/
+android/
+ios/
+*.apk
+*.aab
+*.ipa
+.env
+coverage/
+.DS_Store
+expo-env.d.ts
