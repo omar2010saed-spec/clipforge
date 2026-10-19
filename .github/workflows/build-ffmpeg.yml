@@ -39,6 +39,8 @@ jobs:
 
       - name: Build FFmpegKit (LGPL, hardware codecs via MediaCodec)
         working-directory: ${{ runner.temp }}/ffmpeg-kit
+        env:
+          CMAKE_POLICY_VERSION_MINIMUM: "3.5"
         run: |
           set -o pipefail
           ./android.sh --api-level=24 --disable-x86 --disable-x86-64 --disable-arm-v7a \
