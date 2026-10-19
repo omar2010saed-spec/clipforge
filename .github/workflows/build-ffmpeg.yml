@@ -25,7 +25,7 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y autoconf automake libtool pkg-config nasm yasm gettext gperf cmake git curl texinfo meson ninja-build rsync python3 patch xz-utils bzip2 unzip
+          sudo apt-get install -y autoconf automake libtool pkg-config nasm yasm gettext gperf cmake git curl texinfo meson ninja-build rsync python3 patch xz-utils bzip2 unzip groff
 
       - name: Install NDK r25
         run: |
@@ -42,7 +42,7 @@ jobs:
         run: |
           set -o pipefail
           ./android.sh --api-level=24 --disable-x86 --disable-x86-64 --disable-arm-v7a \
-            --enable-android-media-codec --enable-android-zlib --enable-gnutls 2>&1 | tee "$GITHUB_WORKSPACE/ffmpeg-build.log"
+            --enable-android-media-codec --enable-android-zlib 2>&1 | tee "$GITHUB_WORKSPACE/ffmpeg-build.log"
 
       - name: Locate AAR
         run: |
