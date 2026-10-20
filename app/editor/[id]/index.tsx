@@ -7,7 +7,7 @@ import { PreviewCanvas } from '@/components/PreviewCanvas';
 import { Timeline } from '@/components/Timeline';
 import { BottomSheet } from '@/components/BottomSheet';
 import { EmptyState } from '@/components/EmptyState';
-import { Chip, IconButton, ToolButton } from '@/components/ui';
+import { Chip, IconButton, Stepper, ToolButton } from '@/components/ui';
 import { useEditorStore } from '@/store/editorStore';
 import {
   deleteClip,
@@ -17,6 +17,7 @@ import {
   findClip,
   findText,
   makeText,
+  setClipAdjust,
   setClipSpeed,
   setClipTransform,
   setClipVolume,
@@ -25,8 +26,16 @@ import {
   trimToPlayhead,
   updateText,
   activeClips,
+  addMedia,
+  copyItem,
+  pasteItem,
+  splitAllAt,
+  splitTextAt,
 } from '@/editor/timeline';
 import { projectDurationMs } from '@/models/project';
+import { SFX_IDS, type SfxId } from '@/sfx/synth';
+import { ensureSfxFile } from '@/sfx/sfxFiles';
+import { ADJUST_LIMITS, matchingPreset, NEUTRAL_ADJUST, PRESETS, type AdjustKey } from '@/editor/adjust';
 import { colors, radius, spacing } from '@/theme/colors';
 import { formatDuration } from '@/utils/format';
 import { isRTL, t } from '@/i18n';
@@ -40,7 +49,17 @@ const STICKERS = [
   '☀️', '🌙', '⚡', '🍕', '🎁', '📌', '✅', '❌',
 ];
 
-type SheetKind = 'speed' | 'volume' | 'size' | 'sticker' | null;
+type SheetKind = 'speed' | 'volume' | 'size' | 'sticker' | 'color' | 'sfx' | null;
+
+const ADJUST_ROWS: { key: AdjustKey; label: Parameters<typeof t>[0]; step: number }[] = [
+  { key: 'brightness', label: 'adjBrightness', step: 0.1 },
+  { key: 'contrast', label: 'adjContrast', step: 0.1 },
+  { key: 'saturation', label: 'adjSaturation', step: 0.1 },
+  { key: 'warmth', label: 'adjWarmth', step: 0.1 },
+];
+const PRESET_LABELS: Record<string, Parameters<typeof t>[0]> = {
+  none: 'pNone', bw: 'pBw', vivid: 'pVivid', warm: 'pWarm', cool: 'pCool', vintage: 'pVintage', fade: 'pFade',
+};
 
 export default function EditorScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -58,7 +77,8 @@ export default function EditorScreen() {
   const playing = useEditorStore((s) => s.playing);
   const canUndo = useEditorStore((s) => s.past.length > 0);
   const canRedo = useEditorStore((s) => s.future.length > 0);
-  const { load, reset, flush, commit, run, undo, redo, select, setTime, setPlaying, zoom, clearError } =
+  const clipboard = useEditorStore((s) => s.clipboard);
+  const { load, reset, flush, commit, run, undo, redo, select, setTime, setPlaying, zoom, clearError, setClipboard } =
     useEditorStore.getState();
 
   const [sheet, setSheet] = useState<SheetKind>(null);
@@ -130,12 +150,52 @@ export default function EditorScreen() {
     return targetClipId;
   };
 
+  /** Premiere-style razor: the selected item, otherwise every clip and text under the playhead. */
   const onSplit = () => {
-    const cid = needClip();
-    if (!cid) return;
-    const r = run((p) => splitClipAt(p, cid, timeMs));
-    if (!r || !r.newClipId) showHint(t('cannotSplitHere'));
-    else select({ type: 'clip', id: r.newClipId });
+    const state = useEditorStore.getState();
+    const p = state.project;
+    if (!p) return;
+    if (selText) {
+      const r = run((pr) => splitTextAt(pr, selText.id, timeMs));
+      if (!r || !r.newTextId) showHint(t('cannotSplitHere'));
+      else select({ type: 'text', id: r.newTextId });
+      return;
+    }
+    if (selClip) {
+      const r = run((pr) => splitClipAt(pr, selClip.clip.id, timeMs));
+      if (!r || !r.newClipId) showHint(t('cannotSplitHere'));
+      else select({ type: 'clip', id: r.newClipId });
+      return;
+    }
+    const r = run((pr) => splitAllAt(pr, timeMs));
+    if (!r || r.count === 0) showHint(t('cannotSplitHere'));
+  };
+
+  const onCopy = (): boolean => {
+    const state = useEditorStore.getState();
+    const sel = state.selection ?? (targetClipId ? { type: 'clip' as const, id: targetClipId } : null);
+    const item = state.project ? copyItem(state.project, sel) : null;
+    if (!item) {
+      showHint(t('selectClipFirst'));
+      return false;
+    }
+    setClipboard(item);
+    return true;
+  };
+
+  const onCut = () => {
+    if (!onCopy()) return;
+    onDelete();
+  };
+
+  const onPaste = () => {
+    const item = useEditorStore.getState().clipboard;
+    if (!item) {
+      showHint(t('nothingToPaste'));
+      return;
+    }
+    const r = run((pr) => pasteItem(pr, item, timeMs));
+    if (r?.id) select({ type: r.type, id: r.id });
   };
 
   const onTrim = (keep: 'before' | 'after') => {
@@ -169,6 +229,22 @@ export default function EditorScreen() {
     if (r?.textId) {
       select({ type: 'text', id: r.textId });
       router.push({ pathname: '/editor/[id]/text', params: { id: projectId, textId: r.textId } });
+    }
+  };
+
+  const addSfx = async (id: SfxId) => {
+    try {
+      const f = await ensureSfxFile(id);
+      const at = useEditorStore.getState().timeMs;
+      const r = run((p) => {
+        const res = addMedia(p, { kind: 'audio', uri: f.uri, name: t(`sfx_${id}`), durationMs: f.durationMs, hasAudio: true }, 'audio', at);
+        return { project: res.project, clipId: res.clipId };
+      });
+      if (r?.clipId) select({ type: 'clip', id: r.clipId });
+      showHint(t('sfxAdded'));
+    } catch (e) {
+      console.warn('[sfx] failed', e);
+      showHint(t('errorTitle'));
     }
   };
 
@@ -224,21 +300,27 @@ export default function EditorScreen() {
       <ToolButton icon="images-outline" label={t('tMedia')} onPress={() => router.push({ pathname: '/editor/[id]/import', params: { id: projectId } })} testID="tool-media" />
       <ToolButton icon="text-outline" label={t('tText')} onPress={addText} testID="tool-text" />
       <ToolButton icon="happy-outline" label={t('tSticker')} onPress={() => setSheet('sticker')} />
+      <ToolButton icon="musical-notes-outline" label={t('tSfx')} onPress={() => setSheet('sfx')} testID="tool-sfx" />
       <ToolButton icon="chatbox-ellipses-outline" label={t('tCaptions')} onPress={() => router.push({ pathname: '/editor/[id]/captions', params: { id: projectId } })} testID="tool-captions" />
       {selText ? (
         <ToolButton icon="create-outline" label={t('tEdit')} onPress={() => router.push({ pathname: '/editor/[id]/text', params: { id: projectId, textId: selText.id } })} />
-      ) : (
+      ) : null}
+      <ToolButton icon="cut-outline" label={t('tSplit')} onPress={onSplit} disabled={!hasClips && project.texts.length === 0} testID="tool-split" />
+      <ToolButton icon="copy-outline" label={t('tCopy')} onPress={onCopy} disabled={!selClip && !selText && !targetClipId} testID="tool-copy" />
+      <ToolButton icon="backspace-outline" label={t('tCut')} onPress={onCut} disabled={!selClip && !selText} testID="tool-cut" />
+      <ToolButton icon="clipboard-outline" label={t('tPaste')} onPress={onPaste} disabled={!clipboard} testID="tool-paste" />
+      {!selText ? (
         <>
-          <ToolButton icon="cut-outline" label={t('tSplit')} onPress={onSplit} disabled={!targetClipId} testID="tool-split" />
           <ToolButton icon="arrow-back-circle-outline" label={t('tTrimStart')} onPress={() => onTrim('after')} disabled={!targetClipId} />
           <ToolButton icon="arrow-forward-circle-outline" label={t('tTrimEnd')} onPress={() => onTrim('before')} disabled={!targetClipId} />
+          <ToolButton icon="color-palette-outline" label={t('tColor')} onPress={() => setSheet('color')} disabled={!targetClipId || target?.clip.kind === 'audio'} testID="tool-color" />
           <ToolButton icon="speedometer-outline" label={t('tSpeed')} onPress={() => setSheet('speed')} disabled={!targetClipId || isStill} />
           <ToolButton icon="repeat-outline" label={t('tReverse')} onPress={() => targetClipId && commit((p) => toggleReverse(p, targetClipId))} disabled={!targetClipId || isStill} />
           <ToolButton icon="volume-high-outline" label={t('tVolume')} onPress={() => setSheet('volume')} disabled={!targetClipId || isStill} />
           {isOverlay ? <ToolButton icon="resize-outline" label={t('tSize')} onPress={() => setSheet('size')} /> : null}
         </>
-      )}
-      <ToolButton icon="copy-outline" label={t('duplicate')} onPress={onDuplicate} disabled={!targetClipId && !selText} />
+      ) : null}
+      <ToolButton icon="duplicate-outline" label={t('duplicate')} onPress={onDuplicate} disabled={!targetClipId && !selText} />
       <ToolButton icon="trash-outline" label={t('delete')} onPress={onDelete} disabled={!selClip && !selText} testID="tool-delete" />
     </ScrollView>
   );
@@ -329,6 +411,44 @@ export default function EditorScreen() {
         </View>
       </BottomSheet>
 
+      <BottomSheet visible={sheet === 'sfx'} onClose={() => setSheet(null)}>
+        <Text style={styles.sheetTitle}>{t('sfxTitle')}</Text>
+        <View style={styles.chips}>
+          {SFX_IDS.map((id) => (
+            <Chip key={id} label={t(`sfx_${id}`)} onPress={() => void addSfx(id)} testID={`sfx-${id}`} />
+          ))}
+        </View>
+      </BottomSheet>
+
+      <BottomSheet visible={sheet === 'color'} onClose={() => setSheet(null)}>
+        <Text style={styles.sheetTitle}>{t('colorTitle')}</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: spacing.sm }}>
+          {Object.keys(PRESETS).map((name) => (
+            <Chip
+              key={name}
+              label={t(PRESET_LABELS[name] ?? 'pNone')}
+              active={matchingPreset(target?.clip.adjust) === name}
+              onPress={() => targetClipId && commit((p) => setClipAdjust(p, targetClipId, PRESETS[name] ?? NEUTRAL_ADJUST))}
+            />
+          ))}
+        </ScrollView>
+        {ADJUST_ROWS.map((row) => {
+          const cur = (target?.clip.adjust ?? NEUTRAL_ADJUST)[row.key];
+          const [lo, hi] = ADJUST_LIMITS[row.key];
+          const shown = row.key === 'brightness' || row.key === 'warmth' ? Math.round(cur * 100) : Math.round(cur * 100) - 100;
+          const set = (v: number) =>
+            targetClipId && commit((p) => setClipAdjust(p, targetClipId, { [row.key]: Math.min(hi, Math.max(lo, Math.round(v * 100) / 100)) }), { coalesce: `adj-${row.key}` });
+          return (
+            <View key={row.key} style={styles.adjRow}>
+              <Text style={styles.adjLabel}>{t(row.label)}</Text>
+              <Stepper value={`${shown > 0 ? '+' : ''}${shown}`} onDec={() => set(cur - row.step)} onInc={() => set(cur + row.step)} />
+            </View>
+          );
+        })}
+        <Chip label={t('adjReset')} onPress={() => targetClipId && commit((p) => setClipAdjust(p, targetClipId, NEUTRAL_ADJUST))} />
+        <Text style={styles.note}>{t('adjNote')}</Text>
+      </BottomSheet>
+
       <BottomSheet visible={sheet === 'sticker'} onClose={() => setSheet(null)}>
         <Text style={styles.sheetTitle}>{t('stickerTitle')}</Text>
         <View style={styles.stickerGrid}>
@@ -359,6 +479,8 @@ const styles = StyleSheet.create({
   errorText: { color: '#fff' },
   sheetTitle: { color: colors.text, fontSize: 18, fontWeight: '700' },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
+  adjRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  adjLabel: { color: colors.text, fontSize: 15 },
   note: { color: colors.textMuted, fontSize: 12 },
   stickerGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, justifyContent: 'center' },
   sticker: { width: 54, height: 54, borderRadius: radius.md, backgroundColor: colors.surfaceAlt, alignItems: 'center', justifyContent: 'center' },

@@ -30,30 +30,87 @@ export function normalizeWhisperTimes(
   return segments.map((s) => ({ text: s.text, startMs: s.t0 * scale, endMs: s.t1 * scale }));
 }
 
+const NON_SPEECH = /\[[^\]]*\]|\([^)]*\)|\*[^*]*\*|♪[^♪]*♪?|<[^>]+>/g;
+const SENTENCE = /[^.!?؟…،,;؛]+[.!?؟…،,;؛]*/g;
+const MIN_LINE_MS = 600;
+
+/** Removes non-speech tags ("[music]", "(applause)", "♪") that whisper emits and tidies spaces. */
+export function cleanCaptionText(text: string): string {
+  const t = text.replace(NON_SPEECH, ' ').replace(/\s+/g, ' ').trim();
+  return /[\p{L}\p{N}]/u.test(t) ? t : '';
+}
+
+function balancedChunks(words: string[], maxWords: number, maxChars: number): string[] {
+  const chars = words.join(' ').length;
+  const count = Math.max(Math.ceil(words.length / maxWords), Math.ceil(chars / maxChars), 1);
+  const per = Math.ceil(words.length / count);
+  const out: string[] = [];
+  for (let i = 0; i < words.length; i += per) out.push(words.slice(i, i + per).join(' '));
+  return out;
+}
+
 /**
- * Splits long segments into short, readable lines (max `maxWords` words) and distributes
- * the segment duration over the lines in proportion to their character count.
+ * Turns recognizer segments into short, readable caption lines:
+ *  - drops non-speech tags and empty text,
+ *  - splits at sentence punctuation, then into balanced chunks (<= maxWords words / maxChars chars),
+ *  - merges one-word crumbs into their neighbour,
+ *  - distributes each segment's duration over its lines by character count,
+ *  - removes repeated lines (a common recognizer loop), overlaps and flashes shorter than 0.6 s.
  */
-export function splitIntoCaptionLines(segments: RawSegment[], maxWords = 6): CaptionLine[] {
+export function splitIntoCaptionLines(segments: RawSegment[], maxWords = 6, maxChars = 34): CaptionLine[] {
   const lines: CaptionLine[] = [];
   for (const seg of segments) {
-    const words = seg.text.trim().split(/\s+/).filter(Boolean);
-    if (words.length === 0 || seg.endMs <= seg.startMs) continue;
+    const text = cleanCaptionText(seg.text);
+    if (!text || seg.endMs <= seg.startMs) continue;
+
+    const sentences = (text.match(SENTENCE) ?? [text]).map((x) => x.trim()).filter(Boolean);
     const chunks: string[] = [];
-    const chunkCount = Math.ceil(words.length / maxWords);
-    const per = Math.ceil(words.length / chunkCount); // balanced chunks
-    for (let i = 0; i < words.length; i += per) chunks.push(words.slice(i, i + per).join(' '));
+    for (const sentence of sentences) {
+      const words = sentence.split(' ').filter(Boolean);
+      const parts = balancedChunks(words, maxWords, maxChars);
+      for (const part of parts) {
+        const prev = chunks[chunks.length - 1];
+        const crumb = part.split(' ').length < 2 || (prev !== undefined && prev.split(' ').length < 2);
+        if (prev !== undefined && crumb && prev.split(' ').length + part.split(' ').length <= maxWords + 1) {
+          chunks[chunks.length - 1] = `${prev} ${part}`;
+        } else chunks.push(part);
+      }
+    }
+
     const totalChars = chunks.reduce((n, c) => n + c.length, 0);
     const duration = seg.endMs - seg.startMs;
     let cursor = seg.startMs;
-    chunks.forEach((text, i) => {
+    chunks.forEach((chunk, i) => {
       const isLast = i === chunks.length - 1;
-      const end = isLast ? seg.endMs : cursor + Math.round((duration * text.length) / totalChars);
-      lines.push({ text, startMs: Math.round(cursor), endMs: Math.round(end) });
+      const end = isLast ? seg.endMs : cursor + Math.round((duration * chunk.length) / totalChars);
+      lines.push({ text: chunk, startMs: Math.round(cursor), endMs: Math.round(end) });
       cursor = end;
     });
   }
-  return lines;
+  return polishLines(lines);
+}
+
+export function polishLines(input: CaptionLine[]): CaptionLine[] {
+  const sorted = [...input].sort((a, b) => a.startMs - b.startMs);
+  const out: CaptionLine[] = [];
+  for (const l of sorted) {
+    const prev = out[out.length - 1];
+    if (prev && prev.text === l.text && l.startMs - prev.endMs < 1500) {
+      prev.endMs = Math.max(prev.endMs, l.endMs); // repeated line: extend instead of showing twice
+      continue;
+    }
+    out.push({ ...l });
+  }
+  for (let i = 0; i < out.length; i++) {
+    const cur = out[i]!;
+    const next = out[i + 1];
+    if (next && cur.endMs > next.startMs) cur.endMs = next.startMs;
+    if (cur.endMs - cur.startMs < MIN_LINE_MS) {
+      const limit = next ? next.startMs : Infinity;
+      cur.endMs = Math.min(limit, cur.startMs + MIN_LINE_MS);
+    }
+  }
+  return out.filter((l) => l.endMs - l.startMs >= 100);
 }
 
 /**

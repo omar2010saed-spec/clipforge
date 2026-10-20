@@ -21,7 +21,12 @@ const modelDir = () => `${FileSystem.documentDirectory}models/`;
 interface WhisperContextLike {
   transcribe(
     path: string,
-    options: { language?: string },
+    options: {
+      language?: string;
+      maxThreads?: number;
+      translate?: boolean;
+      onProgress?: (percent: number) => void;
+    },
   ): { stop: () => Promise<void>; promise: Promise<{ result: string; segments?: { text: string; t0: number; t1: number }[] }> };
   release(): Promise<void>;
 }
@@ -74,8 +79,8 @@ export async function ensureModel(key: ModelKey, onProgress: (pct: number) => vo
 export async function extractWav(engine: Engine, clip: Clip, startMs: number, endMs: number): Promise<string> {
   const out = `${FileSystem.cacheDirectory}caption-${Date.now()}.wav`;
   const args = [
-    '-y', '-ss', (startMs / 1000).toFixed(3), '-t', ((endMs - startMs) / 1000).toFixed(3),
-    '-i', uriToPath(clip.sourceUri), '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', uriToPath(out),
+    '-y', '-vn', '-sn', '-dn', '-ss', (startMs / 1000).toFixed(3), '-t', ((endMs - startMs) / 1000).toFixed(3),
+    '-i', uriToPath(clip.sourceUri), '-ac', '1', '-ar', '16000', '-c:a', 'pcm_s16le', uriToPath(out),
   ];
   const res = await engine.run(args);
   if (res.cancelled) throw new Error('cancelled');
@@ -87,6 +92,24 @@ export async function deleteQuietly(path: string): Promise<void> {
   await FileSystem.deleteAsync(path, { idempotent: true }).catch(() => undefined);
 }
 
+/** The loaded model is kept between runs: re-loading it is the slowest part of a repeat run. */
+let cached: { path: string; ctx: WhisperContextLike } | null = null;
+
+export async function releaseWhisper(): Promise<void> {
+  const c = cached;
+  cached = null;
+  await c?.ctx.release().catch(() => undefined);
+}
+
+async function getContext(modelPath: string): Promise<WhisperContextLike> {
+  if (cached && cached.path === modelPath) return cached.ctx;
+  await releaseWhisper();
+  const init = (Whisper as unknown as { initWhisper: (o: { filePath: string }) => Promise<WhisperContextLike> }).initWhisper;
+  const ctx = await init({ filePath: modelPath });
+  cached = { path: modelPath, ctx };
+  return ctx;
+}
+
 /** Runs speech recognition and returns segments relative to the start of the audio file. */
 export async function transcribeWav(
   wavPath: string,
@@ -94,15 +117,17 @@ export async function transcribeWav(
   language: SpeechLanguage,
   rangeMs: number,
   onStop?: (stop: () => Promise<void>) => void,
+  onProgress?: (percent: number) => void,
 ): Promise<RawSegment[]> {
-  const init = (Whisper as unknown as { initWhisper: (o: { filePath: string }) => Promise<WhisperContextLike> }).initWhisper;
-  const ctx = await init({ filePath: modelPath });
-  try {
-    const { stop, promise } = ctx.transcribe(wavPath, language === 'auto' ? {} : { language });
-    onStop?.(stop);
-    const res = await promise;
-    return normalizeWhisperTimes(res.segments ?? [], rangeMs);
-  } finally {
-    await ctx.release().catch(() => undefined);
-  }
+  const ctx = await getContext(modelPath);
+  const options = {
+    ...(language === 'auto' ? {} : { language }),
+    maxThreads: 4,
+    translate: false,
+    onProgress,
+  };
+  const { stop, promise } = ctx.transcribe(wavPath, options);
+  onStop?.(stop);
+  const res = await promise;
+  return normalizeWhisperTimes(res.segments ?? [], rangeMs);
 }

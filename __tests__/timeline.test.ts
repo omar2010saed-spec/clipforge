@@ -17,6 +17,12 @@ import {
   updateText,
   moveText,
   removeCaptions,
+  splitAllAt,
+  trimClipEdge,
+  trimTextEdge,
+  copyItem,
+  pasteItem,
+  snapMs,
 } from '../src/editor/timeline';
 
 const vid = (name: string, durationMs: number) => ({ kind: 'video' as const, uri: `file:///${name}.mp4`, name, durationMs });
@@ -203,5 +209,80 @@ describe('assignLanes', () => {
     expect(lanes.get('a')).toBe(0);
     expect(lanes.get('b')).toBe(1);
     expect(lanes.get('c')).toBe(0);
+  });
+});
+
+describe('premiere-style editing', () => {
+  it('splitAllAt cuts every track under the playhead', () => {
+    let p = createEmptyProject('t');
+    p = addMedia(p, vid('a', 4000), 'main').project;
+    p = addMedia(p, vid('o', 4000), 'overlay', 0).project;
+    const r = splitAllAt(p, 2000);
+    expect(r.count).toBe(2);
+    expect(trackOf(r.project, 'video')!.clips).toHaveLength(2);
+    expect(trackOf(r.project, 'overlay')!.clips).toHaveLength(2);
+  });
+
+  it('trimClipEdge ripples the main track (start and end)', () => {
+    const { p, ids } = withThree(); // a 0-4000, b 4000-6000, c 6000-12000
+    let q = trimClipEdge(p, ids[0]!, 'end', 3000);
+    expect(trackOf(q, 'video')!.clips.map((c) => c.startMs)).toEqual([0, 3000, 5000]);
+    q = trimClipEdge(q, ids[0]!, 'start', 1000);
+    const a = findClip(q, ids[0]!)!.clip;
+    expect(a.inMs).toBe(1000);
+    expect(clipDurationMs(a)).toBe(2000);
+    expect(projectDurationMs(q)).toBe(2000 + 2000 + 6000);
+  });
+
+  it('trimClipEdge respects source bounds and reverse', () => {
+    const { p, ids } = withThree();
+    let q = trimClipEdge(p, ids[0]!, 'end', 99999); // cannot extend past the source
+    expect(findClip(q, ids[0]!)!.clip.outMs).toBe(4000);
+    q = toggleReverse(p, ids[0]!);
+    q = trimClipEdge(q, ids[0]!, 'start', 1000); // reversed: timeline start = source end
+    const c = findClip(q, ids[0]!)!.clip;
+    expect(c.outMs).toBe(3000);
+    expect(c.inMs).toBe(0);
+  });
+
+  it('copy / paste inserts at the playhead on the main track', () => {
+    const { p, ids } = withThree();
+    const item = copyItem(p, { type: 'clip', id: ids[1]! })!; // b (2000 ms)
+    const r = pasteItem(p, item, 1000); // inside a
+    const clips = trackOf(r.project, 'video')!.clips;
+    expect(clips.map((c) => c.name)).toEqual(['a', 'b', 'a', 'b', 'c']);
+    expect(clips.map((c) => c.startMs)).toEqual([0, 1000, 3000, 6000, 8000]);
+    expect(projectDurationMs(r.project)).toBe(14000);
+    expect(r.id).toBe(clips[1]!.id);
+  });
+
+  it('paste at a cut point and at the end', () => {
+    const { p, ids } = withThree();
+    const item = copyItem(p, { type: 'clip', id: ids[0]! })!;
+    const atCut = pasteItem(p, item, 4000);
+    expect(trackOf(atCut.project, 'video')!.clips.map((c) => c.name)).toEqual(['a', 'a', 'b', 'c']);
+    const atEnd = pasteItem(p, item, 99999);
+    expect(trackOf(atEnd.project, 'video')!.clips.map((c) => c.name)).toEqual(['a', 'b', 'c', 'a']);
+  });
+
+  it('paste on overlay track and for texts', () => {
+    let p = createEmptyProject('t');
+    const o = addMedia(p, vid('o', 3000), 'overlay', 500);
+    p = o.project;
+    const r = pasteItem(p, copyItem(p, { type: 'clip', id: o.clipId! })!, 2000);
+    expect(trackOf(r.project, 'overlay')!.clips.map((c) => c.startMs)).toEqual([500, 2000]);
+    const tx = makeText(p, { text: 'hi' }, 0);
+    const pt = pasteItem(tx.project, copyItem(tx.project, { type: 'text', id: tx.textId! })!, 5000);
+    expect(pt.project.texts.map((x) => [x.startMs, x.endMs])).toEqual([[0, 3000], [5000, 8000]]);
+  });
+
+  it('trimTextEdge and snapMs', () => {
+    const tx = makeText(createEmptyProject('t'), { text: 'hi' }, 1000); // 1000-4000
+    const a = trimTextEdge(tx.project, tx.textId!, 'end', 2500);
+    expect(a.texts[0]!.endMs).toBe(2500);
+    const b = trimTextEdge(a, tx.textId!, 'start', 9999);
+    expect(b.texts[0]!.startMs).toBe(2400);
+    expect(snapMs(1010, [1000, 5000], 50)).toBe(1000);
+    expect(snapMs(1100, [1000], 50)).toBe(1100);
   });
 });

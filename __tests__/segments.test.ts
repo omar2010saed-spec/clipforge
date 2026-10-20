@@ -1,4 +1,4 @@
-import { mapLinesToTimeline, normalizeWhisperTimes, splitIntoCaptionLines } from '../src/captions/segments';
+import { cleanCaptionText, mapLinesToTimeline, normalizeWhisperTimes, polishLines, splitIntoCaptionLines } from '../src/captions/segments';
 import { createEmptyProject } from '../src/models/project';
 import { addMedia, findClip, setClipSpeed, toggleReverse } from '../src/editor/timeline';
 
@@ -28,6 +28,36 @@ describe('splitIntoCaptionLines', () => {
     ]);
     expect(lines).toHaveLength(1);
     expect(lines[0]!.text).toBe('مرحبا بكم في التطبيق');
+  });
+});
+
+describe('caption quality', () => {
+  it('removes non-speech tags', () => {
+    expect(cleanCaptionText(' [موسيقى] hello (applause) world ♪ ')).toBe('hello world');
+    expect(cleanCaptionText('[BLANK_AUDIO]')).toBe('');
+    expect(cleanCaptionText('...')).toBe('');
+  });
+  it('splits at sentence punctuation and keeps lines short', () => {
+    const lines = splitIntoCaptionLines([{ text: 'Hello everyone. Welcome to my channel today, we will learn something new!', startMs: 0, endMs: 8000 }]);
+    expect(lines.length >= 3).toBe(true);
+    for (const l of lines) expect(l.text.length <= 40).toBe(true);
+    expect(lines[0]!.startMs).toBe(0);
+    expect(lines[lines.length - 1]!.endMs).toBe(8000);
+  });
+  it('merges one-word crumbs', () => {
+    const lines = splitIntoCaptionLines([{ text: 'No. I think so', startMs: 0, endMs: 3000 }]);
+    expect(lines.map((l) => l.text)).toEqual(['No. I think so']);
+  });
+  it('drops repeated lines, fixes overlaps and too-short flashes', () => {
+    const out = polishLines([
+      { text: 'a b', startMs: 0, endMs: 1500 },
+      { text: 'a b', startMs: 1500, endMs: 3000 },
+      { text: 'c d', startMs: 2900, endMs: 3100 },
+      { text: 'e f', startMs: 5000, endMs: 5100 },
+    ]);
+    expect(out.map((l) => l.text)).toEqual(['a b', 'c d', 'e f']);
+    expect(out[0]!.endMs).toBe(2900);
+    expect(out[2]!.endMs - out[2]!.startMs).toBe(600);
   });
 });
 

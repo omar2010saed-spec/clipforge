@@ -11,6 +11,7 @@ import {
   deleteQuietly,
   ensureModel,
   extractWav,
+  releaseWhisper,
   transcribeWav,
   type ModelKey,
   type SpeechLanguage,
@@ -60,6 +61,8 @@ export default function CaptionsScreen() {
   const [pct, setPct] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const cancelled = useRef(false);
+  // free the (large) speech model when leaving the screen
+  useEffect(() => () => void releaseWhisper(), []);
   const stopRef = useRef<null | (() => Promise<void>)>(null);
 
   // reset the range whenever another source clip is chosen
@@ -92,19 +95,30 @@ export default function CaptionsScreen() {
     setMessage(null);
     let wav: string | null = null;
     try {
+      // model download and audio extraction are independent: run them side by side
       setPhase('download');
       setPct(0);
-      const modelPath = await ensureModel(model, setPct);
-      if (cancelled.current) throw new Error('cancelled');
-
-      setPhase('extract');
-      wav = await extractWav(engine, clip, rangeStart, rangeEnd);
+      const [modelPath, wavPath] = await Promise.all([
+        ensureModel(model, setPct),
+        extractWav(engine, clip, rangeStart, rangeEnd).then((w) => {
+          wav = w;
+          return w;
+        }),
+      ]);
       if (cancelled.current) throw new Error('cancelled');
 
       setPhase('transcribe');
-      const segments = await transcribeWav(wav, modelPath, language, rangeEnd - rangeStart, (stop) => {
-        stopRef.current = stop;
-      });
+      setPct(0);
+      const segments = await transcribeWav(
+        wavPath,
+        modelPath,
+        language,
+        rangeEnd - rangeStart,
+        (stop) => {
+          stopRef.current = stop;
+        },
+        (p) => setPct(Math.max(0, Math.min(100, Math.round(p)))),
+      );
       if (cancelled.current) throw new Error('cancelled');
 
       // segment times are relative to the extracted audio -> shift to source time, then to the timeline
@@ -148,7 +162,7 @@ export default function CaptionsScreen() {
 
   const busy = phase !== 'idle';
   const phaseText =
-    phase === 'download' ? t('downloadingModel', { pct }) : phase === 'extract' ? t('extractingAudio') : phase === 'transcribe' ? t('transcribing') : '';
+    phase === 'download' ? t('downloadingModel', { pct }) : phase === 'extract' ? t('extractingAudio') : phase === 'transcribe' ? `${t('transcribing')} ${pct}%` : '';
 
   return (
     <View style={[styles.root, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>

@@ -7,6 +7,7 @@ import { DESIGN_SHORT_SIDE } from '@/types';
 import { activeClips, activeTexts, sourceTimeMs, trackOf } from '@/editor/timeline';
 import type { Selection } from '@/store/editorStore';
 import { TextOverlayBody } from './TextOverlayView';
+import { previewTints } from '@/editor/adjust';
 import { colors } from '@/theme/colors';
 
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
@@ -89,6 +90,19 @@ function MediaLayer({ clip, timeMs, playing, muted }: { clip: Clip; timeMs: numb
   return <VideoLayer clip={clip} timeMs={timeMs} playing={playing} muted={muted} />;
 }
 
+/** Approximate live preview of the clip's color grading (the export applies the exact filters). */
+function TintLayers({ adjust }: { adjust: Clip['adjust'] }) {
+  const tints = previewTints(adjust);
+  if (tints.length === 0) return null;
+  return (
+    <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+      {tints.map((t, i) => (
+        <View key={i} pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: t.color, opacity: t.opacity }]} />
+      ))}
+    </View>
+  );
+}
+
 function Draggable({
   enabled,
   onSelect,
@@ -96,6 +110,7 @@ function Draggable({
   box,
   x,
   y,
+  rotationDeg = 0,
   children,
 }: {
   enabled: boolean;
@@ -104,6 +119,8 @@ function Draggable({
   box: Box;
   x: number;
   y: number;
+  /** rotation of the parent frame; the visual drag offset is counter-rotated so it follows the finger */
+  rotationDeg?: number;
   children: React.ReactNode;
 }) {
   const [drag, setDrag] = useState({ x: 0, y: 0 });
@@ -123,9 +140,12 @@ function Draggable({
       ),
     [enabled, onMove, onSelect, box.w, box.h, x, y],
   );
+  const rad = (-rotationDeg * Math.PI) / 180;
+  const vx = drag.x * Math.cos(rad) - drag.y * Math.sin(rad);
+  const vy = drag.x * Math.sin(rad) + drag.y * Math.cos(rad);
   return (
     <GestureDetector gesture={gesture}>
-      <View collapsable={false} style={{ transform: [{ translateX: drag.x }, { translateY: drag.y }] }}>
+      <View collapsable={false} style={{ transform: [{ translateX: vx }, { translateY: vy }] }}>
         {children}
       </View>
     </GestureDetector>
@@ -161,6 +181,7 @@ function OverlayClipLayer({
       <Draggable enabled={selected} onSelect={onSelect} onMove={onMove} box={box} x={clip.x} y={clip.y}>
         <View style={[{ width: side, height: side }, selected && styles.selected]}>
           <MediaLayer clip={clip} timeMs={timeMs} playing={playing} muted={muted} />
+          <TintLayers adjust={clip.adjust} />
         </View>
       </Draggable>
     </View>
@@ -206,7 +227,7 @@ function TextLayer({
         transform: [{ rotate: `${overlay.rotation}deg` }],
       }}
     >
-      <Draggable enabled={selected} onSelect={onSelect} onMove={onMove} box={box} x={overlay.x} y={overlay.y}>
+      <Draggable enabled={selected} onSelect={onSelect} onMove={onMove} box={box} x={overlay.x} y={overlay.y} rotationDeg={overlay.rotation}>
         <View style={selected ? styles.selected : undefined}>
           <TextOverlayBody overlay={overlay} scale={scale} maxWidth={box.w * 0.9} />
         </View>
@@ -247,6 +268,7 @@ export function PreviewCanvas({ project, timeMs, playing, selection, onSelect, o
           {main ? (
             <MediaLayer key={main.id} clip={main} timeMs={timeMs} playing={playing} muted={muted('video')} />
           ) : null}
+          {main ? <TintLayers adjust={main.adjust} /> : null}
           {overlays.map((c) => (
             <OverlayClipLayer
               key={c.id}
@@ -282,7 +304,8 @@ export function PreviewCanvas({ project, timeMs, playing, selection, onSelect, o
 }
 
 const styles = StyleSheet.create({
-  area: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#050507' },
-  canvas: { backgroundColor: '#000', overflow: 'hidden' },
+  area: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#050507', direction: 'ltr' },
+  // Positions are stored as left-to-right fractions, so the canvas must never be mirrored by RTL layouts.
+  canvas: { backgroundColor: '#000', overflow: 'hidden', direction: 'ltr' },
   selected: { borderWidth: 1.5, borderColor: colors.primary, borderStyle: 'dashed' },
 });

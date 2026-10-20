@@ -6,6 +6,18 @@ export type TextAlign = 'left' | 'center' | 'right';
 /** Reference size used to express font sizes; scaled to the preview / export size. */
 export const DESIGN_SHORT_SIDE = 1080;
 
+/** Color grading of a clip; every field neutral = no change. */
+export interface ClipAdjust {
+  /** -1..1 (0 = original) */
+  brightness: number;
+  /** 0.3..2 (1 = original) */
+  contrast: number;
+  /** 0..2 (1 = original, 0 = black & white) */
+  saturation: number;
+  /** -1 (cool) .. 1 (warm) */
+  warmth: number;
+}
+
 export interface Clip {
   id: string;
   trackId: string;
@@ -29,6 +41,8 @@ export interface Clip {
   x: number;
   y: number;
   scale: number;
+  /** Optional color grading (absent on projects saved before it existed) */
+  adjust?: ClipAdjust;
 }
 
 export interface Track {

@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import type { Project } from '@/types';
 import { projectRepository } from '@/storage/projectRepository';
 import { projectDurationMs } from '@/models/project';
-import { findClip, findText } from '@/editor/timeline';
+import { findClip, findText, type ClipboardItem } from '@/editor/timeline';
 import { t } from '@/i18n';
 
 export type Selection = { type: 'clip' | 'text'; id: string } | null;
@@ -23,7 +23,9 @@ interface EditorState {
   pxPerSec: number;
   past: Project[];
   future: Project[];
+  clipboard: ClipboardItem | null;
 
+  setClipboard: (item: ClipboardItem | null) => void;
   load: (id: string) => Promise<void>;
   reset: () => void;
   commit: (fn: (p: Project) => Project, opts?: { coalesce?: string }) => void;
@@ -80,6 +82,11 @@ export const useEditorStore = create<EditorState>()((set, get) => {
     pxPerSec: 80,
     past: [],
     future: [],
+    clipboard: null,
+
+    setClipboard(item) {
+      set({ clipboard: item });
+    },
 
     async load(id) {
       set({ status: 'loading', error: null, project: null, selection: null, timeMs: 0, playing: false, past: [], future: [] });

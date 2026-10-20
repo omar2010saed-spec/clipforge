@@ -13,7 +13,7 @@ import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { Ionicons } from '@expo/vector-icons';
 import type { Project, TrackKind } from '@/types';
 import { clipEndMs, projectDurationMs, TRACK_ORDER } from '@/models/project';
-import { assignLanes, moveClip, moveText } from '@/editor/timeline';
+import { assignLanes, moveClip, moveText, snapMs, trimClipEdge, trimTextEdge } from '@/editor/timeline';
 import { useEditorStore } from '@/store/editorStore';
 import { colors, radius } from '@/theme/colors';
 import { formatDuration } from '@/utils/format';
@@ -78,6 +78,7 @@ function Block({
   pxPerMs,
   onPress,
   onMove,
+  onTrim,
   onDragState,
 }: {
   item: Item;
@@ -90,9 +91,27 @@ function Block({
   pxPerMs: number;
   onPress: (item: Item) => void;
   onMove: (item: Item, newStartMs: number) => void;
+  onTrim: (item: Item, edge: 'start' | 'end', toMs: number) => void;
   onDragState: (dragging: boolean) => void;
 }) {
   const [dx, setDx] = useState(0);
+  const [trim, setTrim] = useState<{ edge: 'start' | 'end'; dx: number } | null>(null);
+  const makeHandle = (edge: 'start' | 'end') =>
+    Gesture.Pan()
+      .runOnJS(true)
+      .activeOffsetX([-3, 3])
+      .onStart(() => onDragState(true))
+      .onUpdate((e) => setTrim({ edge, dx: e.translationX }))
+      .onEnd((e) => onTrim(item, edge, (edge === 'start' ? item.start : item.end) + e.translationX / pxPerMs))
+      .onFinalize(() => {
+        setTrim(null);
+        onDragState(false);
+      });
+  const startHandle = useMemo(() => makeHandle('start'), [item, onTrim, onDragState, pxPerMs]); // eslint-disable-line react-hooks/exhaustive-deps
+  const endHandle = useMemo(() => makeHandle('end'), [item, onTrim, onDragState, pxPerMs]); // eslint-disable-line react-hooks/exhaustive-deps
+  const shownLeft = left + dx + (trim?.edge === 'start' ? trim.dx : 0);
+  const shownWidth = Math.max(6, width - (trim ? (trim.edge === 'start' ? trim.dx : -trim.dx) : 0));
+  const handleW = Math.min(18, Math.max(8, width / 3));
   const [thumbUri, setThumbUri] = useState<string | null>(null);
   const thumb = item.thumb;
   useEffect(() => {
@@ -132,7 +151,7 @@ function Block({
         onPress={() => onPress(item)}
         style={[
           styles.block,
-          { left: left + dx, top, width, height, backgroundColor: color },
+          { left: shownLeft, top, width: shownWidth, height, backgroundColor: color },
           selected && styles.blockSelected,
           dx !== 0 && { opacity: 0.8, zIndex: 10 },
         ]}
@@ -148,6 +167,20 @@ function Block({
           {item.badge ? `${item.badge}  ` : ''}
           {item.label}
         </Text>
+        {selected ? (
+          <>
+            <GestureDetector gesture={startHandle}>
+              <View style={[styles.handle, { left: 0, width: handleW }]} collapsable={false}>
+                <View style={styles.grip} />
+              </View>
+            </GestureDetector>
+            <GestureDetector gesture={endHandle}>
+              <View style={[styles.handle, { right: 0, width: handleW }]} collapsable={false}>
+                <View style={styles.grip} />
+              </View>
+            </GestureDetector>
+          </>
+        ) : null}
       </Pressable>
     </GestureDetector>
   );
@@ -201,11 +234,39 @@ export function Timeline() {
     [select],
   );
 
+  /** Snap targets (ms): playhead, project start and the edges of every other item. */
+  const snapTargets = useCallback(
+    (excludeId: string) => {
+      const t: number[] = [0, useEditorStore.getState().timeMs];
+      if (project) {
+        for (const kind of TRACK_ORDER) {
+          for (const i of itemsOf(project, kind)) if (i.id !== excludeId) t.push(i.start, i.end);
+        }
+      }
+      return t;
+    },
+    [project],
+  );
+  const snapThreshold = 10 / pxPerMs;
+
   const onMoveItem = useCallback(
     (item: Item, newStartMs: number) => {
-      commit((p) => (item.type === 'clip' ? moveClip(p, item.id, newStartMs) : moveText(p, item.id, newStartMs)));
+      const len = item.end - item.start;
+      const targets = snapTargets(item.id);
+      const a = snapMs(newStartMs, targets, snapThreshold);
+      const b = snapMs(newStartMs + len, targets, snapThreshold) - len;
+      const snapped = a !== newStartMs ? a : b !== newStartMs ? b : newStartMs;
+      commit((p) => (item.type === 'clip' ? moveClip(p, item.id, snapped) : moveText(p, item.id, snapped)));
     },
-    [commit],
+    [commit, snapTargets, snapThreshold],
+  );
+
+  const onTrimItem = useCallback(
+    (item: Item, edge: 'start' | 'end', toMs: number) => {
+      const snapped = snapMs(toMs, snapTargets(item.id), snapThreshold);
+      commit((p) => (item.type === 'clip' ? trimClipEdge(p, item.id, edge, snapped) : trimTextEdge(p, item.id, edge, snapped)));
+    },
+    [commit, snapTargets, snapThreshold],
   );
 
   if (!project) return null;
@@ -288,6 +349,7 @@ export function Timeline() {
                               pxPerMs={pxPerMs}
                               onPress={onPressItem}
                               onMove={onMoveItem}
+                              onTrim={onTrimItem}
                               onDragState={setDragging}
                             />
                           );
@@ -319,5 +381,7 @@ const styles = StyleSheet.create({
   blockSelected: { borderWidth: 2, borderColor: '#FFFFFF' },
   blockText: { color: '#fff', fontSize: 11, fontWeight: '600' },
   blockTextOnThumb: { textShadowColor: '#000', textShadowRadius: 3 },
+  handle: { position: 'absolute', top: 0, bottom: 0, backgroundColor: 'rgba(255,255,255,0.35)', alignItems: 'center', justifyContent: 'center' },
+  grip: { width: 2, height: '50%', borderRadius: 1, backgroundColor: '#fff' },
   playhead: { position: 'absolute', top: 0, bottom: 0, width: 2, backgroundColor: '#FFFFFF' },
 });

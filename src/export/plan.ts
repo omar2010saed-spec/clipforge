@@ -7,6 +7,7 @@ import type { Clip, ExportPresetKey, ExportSettings, Project, TextOverlay } from
 import { EXPORT_PRESETS } from '../types';
 import { clipDurationMs, clipEndMs, projectDurationMs } from '../models/project';
 import { trackOf } from '../editor/timeline';
+import { adjustFilter } from '../editor/adjust';
 import { uriToPath } from '../utils/path';
 
 export type EncoderMode = 'hardware' | 'software';
@@ -125,6 +126,12 @@ export function buildExportPlan(project: Project, settings: ExportSettings, ctx:
     return parts.join(',');
   };
 
+  /** ",eq=...,colorbalance=..." (leading comma) or "" when the clip has no color grading. */
+  const gradeChain = (clip: Clip): string => {
+    const f = adjustFilter(clip.adjust);
+    return f ? `,${f}` : '';
+  };
+
   const registerAudio = (clip: Clip, inputIndex: number, muted: boolean) => {
     if (muted || clip.volume <= 0 || clip.hasAudio === false) return;
     if (clip.kind === 'image' || clip.kind === 'gif') return;
@@ -140,7 +147,7 @@ export function buildExportPlan(project: Project, settings: ExportSettings, ctx:
     const label = `m${i}`;
     filters.push(
       `[${idx}:v]${timeChain(clip)},scale=${W}:${H}:force_original_aspect_ratio=decrease,` +
-        `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,format=yuv420p[${label}]`,
+        `pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:black,setsar=1${gradeChain(clip)},format=yuv420p[${label}]`,
     );
     mainLabels.push(label);
     registerAudio(clip, idx, mainTrack?.muted ?? false);
@@ -174,7 +181,7 @@ export function buildExportPlan(project: Project, settings: ExportSettings, ctx:
     const label = `o${i}`;
     // fitted into an ow x ow square, exactly like the preview
     filters.push(
-      `[${idx}:v]${timeChain(clip)},scale=${ow}:${ow}:force_original_aspect_ratio=decrease:force_divisible_by=2,setpts=PTS+${s}/TB[${label}]`,
+      `[${idx}:v]${timeChain(clip)},scale=${ow}:${ow}:force_original_aspect_ratio=decrease:force_divisible_by=2${gradeChain(clip)},setpts=PTS+${s}/TB[${label}]`,
     );
     const out = nextLabel();
     filters.push(

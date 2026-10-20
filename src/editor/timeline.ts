@@ -3,9 +3,10 @@
  * Every function returns a new Project (or the same one when the operation is a no-op).
  * No React / native imports here so everything is unit-testable.
  */
-import type { Clip, MediaKind, Project, TextOverlay, Track, TrackKind } from '../types';
+import type { Clip, ClipAdjust, MediaKind, Project, TextOverlay, Track, TrackKind } from '../types';
 import { clipDurationMs, clipEndMs } from '../models/project';
 import { newId } from '../utils/id';
+import { clampAdjust, isNeutral, NEUTRAL_ADJUST } from './adjust';
 
 export const MIN_CLIP_MS = 100;
 export const MIN_SPEED = 0.25;
@@ -227,6 +228,20 @@ export function setClipTransform(
   }));
 }
 
+/** Sets (part of) the color grading of a clip; a fully neutral result removes the field. */
+export function setClipAdjust(project: Project, clipId: string, patch: Partial<ClipAdjust>): Project {
+  return withClipUpdate(project, clipId, (c) => {
+    if (c.kind === 'audio') return c;
+    const next = clampAdjust({ ...NEUTRAL_ADJUST, ...c.adjust, ...patch });
+    if (isNeutral(next)) {
+      const rest = { ...c };
+      delete rest.adjust;
+      return rest;
+    }
+    return { ...c, adjust: next };
+  });
+}
+
 /**
  * Moves a clip. On the main track the clips are re-ordered (drop position decides the new
  * order, the track stays gap-free); on other tracks the clip is placed freely.
@@ -338,4 +353,147 @@ export function assignLanes<T extends { id: string }>(
     lanes.set(item.id, lane);
   }
   return { lanes, laneCount: Math.max(1, laneEnds.length) };
+}
+
+// ---------------------------------------------------------------- Premiere-style editing
+
+/** Splits every clip and text under the playhead (like Premiere's "razor all tracks"). */
+export function splitAllAt(project: Project, atMs: number): { project: Project; count: number } {
+  let p = project;
+  let count = 0;
+  const ids = project.tracks.flatMap((t) => t.clips.map((c) => c.id));
+  for (const id of ids) {
+    const r = splitClipAt(p, id, atMs);
+    if (r.newClipId) {
+      p = r.project;
+      count++;
+    }
+  }
+  for (const x of project.texts) {
+    const r = splitTextAt(p, x.id, atMs);
+    if (r.newTextId) {
+      p = r.project;
+      count++;
+    }
+  }
+  return { project: p, count };
+}
+
+export function splitTextAt(project: Project, textId: string, atMs: number): { project: Project; newTextId: string | null } {
+  const src = findText(project, textId);
+  if (!src || atMs <= src.startMs + MIN_CLIP_MS || atMs >= src.endMs - MIN_CLIP_MS) return { project, newTextId: null };
+  const left: TextOverlay = { ...src, endMs: atMs };
+  const right: TextOverlay = { ...src, id: newId(), startMs: atMs };
+  return {
+    project: { ...project, texts: project.texts.flatMap((x) => (x.id === textId ? [left, right] : [x])) },
+    newTextId: right.id,
+  };
+}
+
+/**
+ * Drags one edge of a clip (ripple trim on the main track, plain trim elsewhere).
+ * `toMs` is the wanted timeline position of the edge. Limits: source bounds and MIN_CLIP_MS.
+ */
+export function trimClipEdge(project: Project, clipId: string, edge: 'start' | 'end', toMs: number): Project {
+  const found = findClip(project, clipId);
+  if (!found) return project;
+  const c = found.clip;
+  const still = c.kind === 'image' || c.kind === 'gif';
+  const start = c.startMs;
+  const end = clipEndMs(c);
+  const minLen = MIN_CLIP_MS;
+
+  // wanted new length of the clip, in timeline ms
+  let newLen: number;
+  if (edge === 'start') newLen = end - Math.min(toMs, end - minLen);
+  else newLen = Math.max(toMs, start + minLen) - start;
+  newLen = Math.max(minLen, newLen);
+
+  // the source range is anchored on the opposite edge (taking reverse into account)
+  const srcLen = newLen * c.speed;
+  const anchoredAtSourceStart = (edge === 'end') !== c.reversed; // keep inMs, change outMs
+  let inMs = c.inMs;
+  let outMs = c.outMs;
+  if (still) {
+    inMs = 0;
+    outMs = clamp(srcLen, minLen, IMAGE_MAX_MS);
+  } else if (anchoredAtSourceStart) {
+    outMs = clamp(inMs + srcLen, inMs + minLen * c.speed, c.sourceDurationMs);
+  } else {
+    inMs = clamp(outMs - srcLen, 0, outMs - minLen * c.speed);
+  }
+  const trimmed: Clip = { ...c, inMs, outMs };
+  const finalLen = clipDurationMs(trimmed);
+  const startMs = edge === 'start' ? end - finalLen : c.startMs;
+  return withClipUpdate(project, clipId, () => ({ ...trimmed, startMs: Math.max(0, startMs) }));
+}
+
+export function trimTextEdge(project: Project, textId: string, edge: 'start' | 'end', toMs: number): Project {
+  const x = findText(project, textId);
+  if (!x) return project;
+  if (edge === 'start') return updateText(project, textId, { startMs: Math.max(0, Math.min(Math.round(toMs), x.endMs - MIN_CLIP_MS)) });
+  return updateText(project, textId, { endMs: Math.max(Math.round(toMs), x.startMs + MIN_CLIP_MS) });
+}
+
+export type ClipboardItem = { type: 'clip'; clip: Clip } | { type: 'text'; text: TextOverlay };
+
+export function copyItem(project: Project, sel: { type: 'clip' | 'text'; id: string } | null): ClipboardItem | null {
+  if (!sel) return null;
+  if (sel.type === 'clip') {
+    const f = findClip(project, sel.id);
+    return f ? { type: 'clip', clip: f.clip } : null;
+  }
+  const x = findText(project, sel.id);
+  return x ? { type: 'text', text: x } : null;
+}
+
+/**
+ * Pastes at the playhead. Main track: inserts between clips (splitting the clip under the playhead
+ * and rippling the rest). Other tracks: placed at the playhead on the same kind of track.
+ */
+export function pasteItem(
+  project: Project,
+  item: ClipboardItem,
+  atMs: number,
+): { project: Project; id: string | null; type: 'clip' | 'text' } {
+  const at = Math.max(0, atMs);
+  if (item.type === 'text') {
+    const track = project.tracks.find((t) => t.id === item.text.trackId) ?? trackOf(project, item.text.isSticker ? 'sticker' : 'text');
+    const len = item.text.endMs - item.text.startMs;
+    const copy: TextOverlay = { ...item.text, id: newId(), trackId: track?.id ?? item.text.trackId, startMs: at, endMs: at + len };
+    return { project: { ...project, texts: [...project.texts, copy] }, id: copy.id, type: 'text' };
+  }
+  const kindTrack = project.tracks.find((t) => t.kind === (project.tracks.find((tr) => tr.id === item.clip.trackId)?.kind ?? 'video'));
+  const track = kindTrack ?? trackOf(project, 'video');
+  if (!track) return { project, id: null, type: 'clip' };
+  const copy: Clip = { ...item.clip, id: newId(), trackId: track.id, startMs: at };
+  if (track.kind !== 'video') {
+    return { project: mapTrack(project, track.id, (t) => ({ ...t, clips: [...t.clips, copy] })), id: copy.id, type: 'clip' };
+  }
+  // main track: insert at a cut point
+  let p = project;
+  let boundary = at;
+  const under = track.clips.find((c) => at > c.startMs && at < clipEndMs(c));
+  if (under) {
+    const r = splitClipAt(p, under.id, at);
+    if (r.newClipId) p = r.project;
+    else boundary = at - under.startMs < clipEndMs(under) - at ? under.startMs : clipEndMs(under); // too close to an edge: snap to it
+  }
+  const key = (c: Clip) => (c.id === copy.id ? boundary - 0.5 : c.startMs);
+  p = mapTrack(p, track.id, (t) => ({ ...t, clips: pack([...t.clips, { ...copy, startMs: boundary }], key) }));
+  return { project: p, id: copy.id, type: 'clip' };
+}
+
+/** Snaps `ms` to the nearest target within `thresholdMs` (or returns it unchanged). */
+export function snapMs(ms: number, targets: number[], thresholdMs: number): number {
+  let best = ms;
+  let bestD = thresholdMs;
+  for (const t of targets) {
+    const d = Math.abs(t - ms);
+    if (d <= bestD) {
+      bestD = d;
+      best = t;
+    }
+  }
+  return best;
 }
